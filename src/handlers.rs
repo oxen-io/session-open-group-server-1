@@ -19,7 +19,7 @@ use warp::{http::StatusCode, reply::Reply, reply::Response, Rejection};
 use super::crypto;
 use super::errors::Error;
 use super::models;
-use super::models::{OldMessage, Room, User};
+use super::models::{OldMessage, PinnedMessage, Room, User};
 use super::rpc;
 use super::storage::{self, db_error};
 
@@ -620,13 +620,27 @@ pub fn get_auth_token_challenge(public_key: &str) -> Result<models::Challenge, R
 
 /// Inserts a message into the database.
 pub fn insert_message(
-    room: Room,
-    user: User,
+    room: &Room,
+    user: &User,
     data: &[u8],
     signature: &[u8],
 ) -> Result<Response, Rejection> {
     let mut conn = storage::get_conn()?;
-    let tx = storage::get_transaction(&mut conn)?;
+    let message = match insert_message_impl(&mut conn, room, user, data, signature) {
+        Ok(m) => m,
+        Err(e) => return Err(e),
+    };
+    let response = json!({ "status_code": StatusCode::OK.as_u16(), "message": message });
+    Ok(warp::reply::json(&response).into_response())
+}
+pub fn insert_message_impl(
+    conn: &mut PooledConnection<SqliteConnectionManager>,
+    room: &Room,
+    user: &User,
+    data: &[u8],
+    signature: &[u8],
+) -> Result<OldMessage, Rejection> {
+    let tx = storage::get_transaction(conn)?;
     require_authorization(
         &tx,
         &user,
@@ -678,8 +692,7 @@ pub fn insert_message(
         return Err(warp::reject::custom(Error::DatabaseFailedInternally));
     }
 
-    let response = json!({ "status_code": StatusCode::OK.as_u16(), "message": message });
-    Ok(warp::reply::json(&response).into_response())
+    Ok(message)
 }
 
 // TODO FIXME: The paging mechanism here is really odd: you can either get the last 256 messages,
@@ -865,7 +878,8 @@ pub fn add_moderator_public(
         &room,
         AuthorizationRequired { admin: true, ..Default::default() },
     )?;
-    add_moderator_impl(session_id, admin, room)
+    let mut conn = storage::get_conn()?;
+    add_moderator_impl(&mut conn, session_id, admin, &room)
 }
 
 // TODO: need ability to add *global* server moderators/admins (which, of course, can only be done
@@ -875,22 +889,24 @@ pub fn add_moderator_public(
 pub async fn add_moderator(
     body: models::ChangeModeratorRequestBody,
 ) -> Result<Response, Rejection> {
+    let mut conn = storage::get_conn()?;
     add_moderator_impl(
+        &mut conn,
         &body.session_id,
         body.admin.unwrap_or(false),
-        storage::get_room_from_token(&*storage::get_conn()?, &body.room_token)?,
+        &storage::get_room_from_token(&*storage::get_conn()?, &body.room_token)?,
     )
 }
 
 pub fn add_moderator_impl(
+    conn: &mut PooledConnection<SqliteConnectionManager>,
     session_id: &str,
     admin: bool,
-    room: Room,
+    room: &Room,
 ) -> Result<Response, Rejection> {
     require_session_id(session_id)?;
 
-    let mut conn = storage::get_conn()?;
-    let tx = storage::get_transaction(&mut conn)?;
+    let tx = storage::get_transaction(conn)?;
 
     if let Err(e) = tx
         .prepare_cached("INSERT OR IGNORE INTO users (session_id) VALUES (?)")
@@ -1190,6 +1206,111 @@ pub fn get_banned_public_keys(user: &User, room: &Room) -> Result<Response, Reje
         "banned_members": banned_members.map_err(db_error)?
     }))
     .into_response())
+}
+
+/// Pins a single message id for the room, deletes all previous pinned messages. Must be called by
+/// a moderator
+pub fn pin_message(id: i64, user: &User, room: &Room) -> Result<Response, Rejection> {
+    // Get a connection
+    let mut conn = storage::get_conn()?;
+    pin_message_impl(&mut conn, id, &user, &room)?;
+    let json = models::StatusCode { status_code: StatusCode::OK.as_u16() };
+    return Ok(warp::reply::json(&json).into_response());
+}
+
+pub fn pin_message_impl(
+    conn: &mut PooledConnection<SqliteConnectionManager>,
+    message: i64,
+    user: &User,
+    room: &Room,
+) -> Result<PinnedMessage, Rejection> {
+    // Check authorization level
+    require_authorization(
+        &conn,
+        user,
+        room,
+        AuthorizationRequired { moderator: true, ..Default::default() },
+    )?;
+    if let Err(err) = delete_pinned_message_impl(conn, user, room) {
+        return Err(err);
+    };
+
+    let tx = conn.transaction().map_err(|_| Error::DatabaseFailedInternally)?;
+    let pinned_message = match tx
+        .prepare_cached("INSERT into pinned_messages (room, message) VALUES (?1, ?2) returning *")
+        .map_err(db_error)?
+        .query_row(params![room.id, message], PinnedMessage::from_row)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Couldn't pin message: {}.", e);
+            return Err(warp::reject::custom(Error::DatabaseFailedInternally));
+        }
+    };
+    tx.commit().map_err(|_| Error::DatabaseFailedInternally)?;
+
+    Ok(pinned_message)
+}
+
+pub fn get_pinned_message(user: &User, room: &Room) -> Result<PinnedMessage, Rejection> {
+    // Get a connection
+    let mut conn = storage::get_conn()?;
+    get_pinned_message_impl(&mut conn, &user, &room)
+}
+pub fn get_pinned_message_impl(
+    conn: &PooledConnection<SqliteConnectionManager>,
+    user: &User,
+    room: &Room,
+) -> Result<PinnedMessage, Rejection> {
+    // Check authorization level
+    require_authorization(
+        &conn,
+        user,
+        room,
+        AuthorizationRequired { moderator: false, ..Default::default() },
+    )?;
+    // Query the database
+    let raw_query = format!("SELECT * FROM pinned_messages ORDER BY updated DESC LIMIT 1");
+    let pinned_message = conn
+        .prepare_cached(&raw_query)
+        .map_err(db_error)?
+        .query_row(params![], PinnedMessage::from_row)
+        .map_err(db_error)?;
+
+    return Ok(pinned_message);
+}
+
+/// Deletes all pinned messages of a room, must be called by a moderator
+pub fn delete_pinned_message(user: &User, room: &Room) -> Result<Response, Rejection> {
+    // Get a connection
+    let mut conn = storage::get_conn()?;
+    return delete_pinned_message_impl(&mut conn, &user, &room);
+}
+
+pub fn delete_pinned_message_impl(
+    conn: &mut PooledConnection<SqliteConnectionManager>,
+    user: &User,
+    room: &Room,
+) -> Result<Response, Rejection> {
+    // Check authorization level
+    require_authorization(
+        &conn,
+        user,
+        room,
+        AuthorizationRequired { moderator: true, ..Default::default() },
+    )?;
+    let tx = conn.transaction().map_err(|_| Error::DatabaseFailedInternally)?;
+    // Delete the message if it's present
+    let stmt = format!("DELETE from pinned_messages WHERE room = (?1)");
+    if let Err(err) = tx.execute(&stmt, [room.id]) {
+        error!("Couldn't delete pinned message due to error: {}.", err);
+        return Err(warp::reject::custom(Error::DatabaseFailedInternally));
+    };
+    // Commit
+    tx.commit().map_err(|_| Error::DatabaseFailedInternally)?;
+    // Return
+    let json = models::StatusCode { status_code: StatusCode::OK.as_u16() };
+    return Ok(warp::reply::json(&json).into_response());
 }
 
 // General

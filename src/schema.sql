@@ -78,7 +78,7 @@ END;
 
 CREATE TABLE pinned_messages (
     room INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    message INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    message INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     updated INTEGER NOT NULL  DEFAULT 0, /* set to the room's `info_updated` counter when pinned (used for ordering). */
     PRIMARY KEY(room, message)
 );
@@ -262,7 +262,7 @@ CREATE TRIGGER room_metadata_pinned_add AFTER INSERT ON pinned_messages
 FOR EACH ROW
 BEGIN
     UPDATE rooms SET info_updates = info_updates + 1 WHERE id = NEW.room;
-    UPDATE pinned_messages SET updated = (SELECT info_updates FROM rooms WHERE id = NEW.room) WHERE id = NEW.id;
+    UPDATE pinned_messages SET updated = (SELECT info_updates FROM rooms WHERE id = NEW.room) WHERE message = NEW.message;
 END;
 CREATE TRIGGER room_metadata_pinned_remove AFTER DELETE ON pinned_messages
 FOR EACH ROW

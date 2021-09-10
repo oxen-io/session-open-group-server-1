@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use ed25519_dalek;
 use log::warn;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use warp::{http::StatusCode, reply::Reply, reply::Response, Rejection};
 
 use super::crypto;
 use super::errors::Error;
 use super::handlers;
-use super::models::{self, Room, User};
+use super::models::{self, PinnedMessage, Room, User};
 use super::storage;
 
 #[allow(dead_code)]
@@ -264,6 +264,21 @@ async fn handle_get_request(
             .into_response());
             // FIXME: can drop `.into_response()` I think?
         }
+        "pinned_message" => {
+            reject_if_file_server_mode(path)?;
+            let pinned_message = match handlers::get_pinned_message(&user, &room) {
+                Ok(pinned_message) => Some(pinned_message),
+                _ => None,
+            };
+            #[derive(Debug, Deserialize, Serialize)]
+            struct Response {
+                status_code: u16,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pinned_message: Option<PinnedMessage>,
+            }
+            let response = Response { status_code: StatusCode::OK.as_u16(), pinned_message };
+            return Ok(warp::reply::json(&response).into_response());
+        }
         "deleted_messages" => {
             reject_if_file_server_mode(path)?;
             let deletions = handlers::get_deleted_messages(query_params, user, room)?;
@@ -398,7 +413,7 @@ async fn handle_post_request(
                     return Err(Error::InvalidRpcCall.into());
                 }
             };
-            return handlers::insert_message(room, user, &message.data, &message.signature);
+            return handlers::insert_message(&room, &user, &message.data, &message.signature);
         }
 
         "files" => {
@@ -500,6 +515,21 @@ async fn handle_post_request(
             };
             return handlers::delete_messages(json.ids, &user, &room);
         }
+        "pin_message" => {
+            reject_if_file_server_mode(path)?;
+            #[derive(Debug, Deserialize)]
+            struct JSON {
+                id: i64,
+            }
+            let json: JSON = match serde_json::from_str(&rpc_call.body) {
+                Ok(json) => json,
+                Err(e) => {
+                    warn!("Couldn't parse JSON from: {} due to error: {}.", rpc_call.body, e);
+                    return Err(warp::reject::custom(Error::InvalidRpcCall));
+                }
+            };
+            return handlers::pin_message(json.id, &user, &room);
+        }
         _ => {
             warn!("Ignoring RPC call with invalid or unused endpoint: {}.", path);
             return Err(Error::InvalidRpcCall.into());
@@ -571,6 +601,18 @@ async fn handle_delete_request(
             }
         };
         return handlers::delete_moderator_public(&session_id, user, room);
+    }
+    // DELETE /pinned_message
+    if path == "pinned_message" {
+        reject_if_file_server_mode(path)?;
+        let room = match get_room(&rpc_call)? {
+            Some(room) => room,
+            None => {
+                warn!("Missing room ID.");
+                return Err(Error::InvalidRpcCall.into());
+            }
+        };
+        return handlers::delete_pinned_message(&user, &room);
     }
     // Unrecognized endpoint
     warn!("Ignoring RPC call with invalid or unused endpoint: {}.", path);
