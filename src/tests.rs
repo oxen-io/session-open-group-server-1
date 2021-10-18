@@ -126,12 +126,11 @@ async fn test_pinned_messages() {
     assert!(pinned_message.is_err());
 
     //insert a message into the room
-    let data = "test message".as_bytes();
-    let signature = "test signature".as_bytes();
+    let data = b"test message";
+    let signature = b"test signature";
 
-    let message_id = handlers::insert_message_impl(&mut conn, &room, &user, &data, &signature)
-        .unwrap()
-        .server_id;
+    let message_id =
+        handlers::insert_message_impl(&mut conn, &room, &user, data, signature).unwrap().server_id;
 
     // Add a pinned message should fail if not moderator
     let result = handlers::pin_message_impl(&mut conn, message_id, &user, &room);

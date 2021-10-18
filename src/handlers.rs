@@ -626,10 +626,7 @@ pub fn insert_message(
     signature: &[u8],
 ) -> Result<Response, Rejection> {
     let mut conn = storage::get_conn()?;
-    let message = match insert_message_impl(&mut conn, room, user, data, signature) {
-        Ok(m) => m,
-        Err(e) => return Err(e),
-    };
+    let message = insert_message_impl(&mut conn, room, user, data, signature)?;
     let response = json!({ "status_code": StatusCode::OK.as_u16(), "message": message });
     Ok(warp::reply::json(&response).into_response())
 }
@@ -1231,9 +1228,7 @@ pub fn pin_message_impl(
         room,
         AuthorizationRequired { moderator: true, ..Default::default() },
     )?;
-    if let Err(err) = delete_pinned_message_impl(conn, user, room) {
-        return Err(err);
-    };
+    let _ = delete_pinned_message_impl(conn, user, room)?;
 
     let tx = conn.transaction().map_err(|_| Error::DatabaseFailedInternally)?;
     let pinned_message = match tx
