@@ -64,3 +64,7 @@ Note that the default is * not * to run in TLS mode. This is because normally th
 ## Building a DEB
 
 To build a DEB, just run `cargo deb` from the project root directory. If you don't yet have `cargo-deb` installed you can get it by running: `cargo install cargo-deb`.
+
+## Building an RPM
+
+To build an RPM, just run `cargo rpm build` from the project root directory. If you don't have `cargo-rpm` installed you can get it by running: `cargo install cargo-rpm`.
