@@ -153,7 +153,24 @@ pub struct DeletedMessage {
     pub deleted_message_id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PinnedMessage {
+    pub room_id: i64,
+    pub message: i64,
+    pub timestamp: i64,
+}
+
+impl PinnedMessage {
+    pub fn from_row(row: &rusqlite::Row) -> Result<PinnedMessage, rusqlite::Error> {
+        return Ok(PinnedMessage {
+            room_id: row.get(row.column_index("room")?)?,
+            message: row.get(row.column_index("message")?)?,
+            timestamp: row.get(row.column_index("updated")?)?,
+        });
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Room {
     #[serde(skip)]
     pub id: i64,
